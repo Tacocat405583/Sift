@@ -6,6 +6,10 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi[standard]>=0.118.0",
     "pydantic-settings>=2.10.0",
+    "nltk",
+    "beautifulsoup4",
+    "tqdm",
+    "lxml"
 ]
 
 [dependency-groups]
