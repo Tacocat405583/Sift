@@ -14,8 +14,7 @@ import urllib, urllib.error, urllib.request
 #Include a descriptive User-Agent header in request
 #e.g., User-Agent: MySearchEngineBot/1.0 (contact: myemail@example.com)
 
-
-USER_AGENT = "SIFTBot/0.1 (contact: nicolashernan2029@gmail.com)"
+USER_AGENT = "SIFTBot/0.1 (contact: nicolashernan2029@gmail.com, nicolaeh@uci.edu)"
 
 # Fastly sits in front of the OAI endpoint and intermittently answers with a
 # bare 406 (empty body, Via: varnish). arXiv also uses 503 + Retry-After for
@@ -44,14 +43,19 @@ def fetch(url: str, attempts: int = 5) -> bytes:
     raise RuntimeError("unreachable")
 
 
-output_file = "../../data/cs"
 
 
-## url = 'http://export.arxiv.org/oai2?verb=Identify'
-url = 'https://oaipmh.arxiv.org/oai?verb=ListRecords&set=cs&metadataPrefix=arXiv&from=2026-08-20&until=2026-08-21'
+if __name__ == "__main__":
+    output_file = "../../data/cs/cs_2026-08-20_2026-08-21_p001.xml"
 
-body = fetch(url)
-print(len(body), "bytes")
+    ## url = 'http://export.arxiv.org/oai2?verb=Identify'
+    url = 'https://oaipmh.arxiv.org/oai?verb=ListRecords&set=cs&metadataPrefix=arXiv&from=2026-08-20&until=2026-08-21'
+
+    body = fetch(url)
+    with open(output_file,"wb") as file:
+        file.write(body)
+
+    print(len(body), "bytes")
 
 
 
