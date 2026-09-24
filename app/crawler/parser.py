@@ -1,9 +1,11 @@
 from lxml import etree
 
+path = "../../data/cs/cs_2026-08-20_2026-08-21_p001.xml"
+
+with open(path,'r') as file:
+    xml_data = file.read()
 
 
-
-xml_data = 
 
 root = etree.fromstring(xml_data.encode('utf-8'))
 
