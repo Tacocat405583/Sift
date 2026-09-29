@@ -9,7 +9,10 @@ dependencies = [
     "nltk",
     "beautifulsoup4",
     "tqdm",
-    "lxml"
+    "lxml",
+    "mlflow>=3.16.0",
+    "requests",
+    "arxiv>=4.0.1",
 ]
 
 [dependency-groups]
