@@ -25,7 +25,8 @@ docker exec -i sift-db psql -U sift -d sift < database/schema.sql   # apply sche
 uv run python -m app.crawler.harvest                    # OAI-PMH -> data/cs/*.xml (resumable)
 uv run python -m app.crawler.load                       # data/cs/*.xml -> papers (idempotent upsert)
 uv run python -m app.search.indexer                     # build terms + postings (~45s)
-uv run uvicorn app.main:app --reload                    # API on :8000, docs at /docs
+uv run python -m app.search.neighbors                   # top-20 neighbors -> graph edges (~16s)
+uv run uvicorn app.main:app --reload                    # test UI at :8000/, API docs at /docs
 uv run pytest -q
 uv run ruff check app tests && uv run ruff format app tests
 ```
@@ -38,7 +39,14 @@ Run modules with `-m` from the repo root (imports are `app.*`).
 - [app/crawler/](app/crawler/) — `response.py` (fetch w/ retry on 406/503), `parser.py`
   (`parse_page(xml) -> (papers, token)`, filters categories, skips deleted records),
   `harvest.py`, `load.py`.
-- [app/search/](app/search/) — `tokenizer.py` (Checkpoint B rules), `indexer.py` (build/refresh index), `tfidf.py` and `pgfts.py` (`search(conn, q, limit) -> [(paper_id, score)]`).
+- [app/search/](app/search/) — `tokenizer.py` (Checkpoint B rules), `indexer.py` (build/refresh index), `tfidf.py` and `pgfts.py` (`search(conn, q, limit) -> [(paper_id, score)]`), `neighbors.py`.
+- [app/api/](app/api/) — `search.py`, `papers.py` (citations), `library.py` (library + searches), `deps.py`.
+- [app/services/citations.py](app/services/citations.py) — Semantic Scholar hydration (background).
+- [app/static/index.html](app/static/index.html) — throwaway test UI served at `/`.
+- [app/static/logo.svg](app/static/logo.svg) — **the SIFT logo** (Nick picked it, generated with
+  Gemini): 4 colored nodes whose connecting edges draw an "S". Use it for the header *and*
+  favicon everywhere, including the React frontend. Header style: 28px icon, "SIFT" 19px/700,
+  letter-spacing 1.2px. Served at `/static/logo.svg`.
 - [database/schema.sql](database/schema.sql) — full schema incl. index, graph and user tables.
 - [reference/](reference/) — Nick's earlier reference code; keep it, don't delete.
 
@@ -83,7 +91,7 @@ Plan: `~/.claude/plans/im-in-school-and-eager-fox.md` (5 sessions).
 - [x] Docker Postgres moved to host port **5433**: a native Windows `postgresql-x64-17` service
       owns 5432 and was answering our connections (password auth failed).
 
-**Session 2 — Index + engines + search API** (in progress)
+**Session 2 — Index + engines + search API**
 - [x] Checkpoint B + tokenizer.py + tests/test_tokenizer.py (8 tests passing total)
 - [x] Checkpoint C + indexer.py: 19,476 papers → 37,695 terms, 1.91M postings, 145 MB, 42s
       (`uv run python -m app.search.indexer`, `--idf` for IDF-only refresh)
@@ -97,8 +105,48 @@ Plan: `~/.claude/plans/im-in-school-and-eager-fox.md` (5 sessions).
       pgfts in OR mode is slower (~340 ms vs ~20 ms for tfidf) — fine for now, note for comparison.
 
 **Session 2** ✅ done 2026-10-02, committed.
+- Follow-up audit (2026-10-02): tfidf's "odd #1" was actually correct (title was truncated in
+  output). Found + fixed a real pgfts bug: `to_tsquery('english', …)` re-stemmed already-stemmed
+  lexemes (nonsense→nonsens→nonsen → no match). Now casts the OR'd string to `::tsquery` in a CTE.
+  Engines now share an identical candidate set; top-20 overlap 4–10/20 (ranking differs, by design).
+  Known TF-IDF limitation: "graph neural networks" #1 has "graph" once but many "neural network"
+  (no coordination factor) — talking point, not a bug.
 
-**Session 3** — neighbors (scipy sparse, chunked, top-20), edges in search response,
-Semantic Scholar citations (BackgroundTasks + `GET /papers/citations?ids=`), library/searches endpoints.
+**Session 3 — Graph data, citations, user data** ✅ done 2026-10-02 (NOT committed yet)
+- [x] `app/search/neighbors.py`: cosine on ltc vectors ((1+ln tf)·idf, L2-norm) built from
+      postings; sparse chunked X@X.T, top-20 → `neighbors`. 389,520 rows in 15.6s, avg sim 0.17.
+      Run: `uv run python -m app.search.neighbors` (after the indexer).
+- [x] `/search` now returns edges (e.g. 345 for "graph neural networks"), deduped pairs.
+- [x] `app/services/citations.py`: Semantic Scholar batch (≤500 ids) as a FastAPI BackgroundTask
+      after /search when any result lacks a count; refresh after 30 days; unknown-to-S2 → 0.
+      **No API key yet → S2 answers 429**; it logs + skips, nodes stay uniform. Add
+      `SEMANTIC_SCHOLAR_API_KEY` to `.env` to make it work.
+- [x] `app/api/papers.py`: `GET /papers/citations?ids=1,2,3` → `{citations, pending}`.
+- [x] `app/api/library.py`: `GET /library`, `PUT|DELETE /library/{paper_id}` (204, idempotent,
+      404 unknown paper), `GET /searches?limit=`.
+- [x] Tests: `conftest.py` (live-DB fixture, skips if DB/index missing), `test_engines.py`,
+      `test_neighbors.py`, `test_api.py` (S2 stubbed; cleans up its searches rows). **32 passing.**
+- [x] Simple test UI: `app/static/index.html` served at `/` (vanilla force-graph from unpkg,
+      list 15 + "load more" 25, engine toggle, similarity slider, click node → highlight in list,
+      save/unsave, recent searches, library, citation poll once after 3s). Throwaway — replaced
+      by React in Session 4. Not yet visually checked by Claude; Nick to try it.
+
+**Ideas for later (Nick, 2026-10-02 — not in v1 scope):**
+- Big "explore the corpus" map: hundreds/thousands of nodes with many distinct clusters and long
+  edges between them, dark background, nodes colored by cluster/category (Nick shared a
+  screenshot of this look and loved it). We already have the data for it (`neighbors` table);
+  it'd be a separate view beyond the 125-result query graph. Needs perf care at that size
+  (WebGL renderer, or precomputed layout).
+
 **Session 4** — React frontend (graph + paginated list + engine toggle + similarity slider).
 **Session 5** — Dockerfile, render.yaml, Neon (`pg_dump | psql` from local), CI, recruiter README.
+- [x] README.md written 2026-10-02 (recruiter-facing): banner = `docs/logo.svg` (dense network
+  "S", redrawn as SVG from Nick's mockup screenshot; header/favicon keep the 4-node
+  `app/static/logo.svg`), `docs/screenshot.png`, pipeline mermaid diagram, lnc.ltc formulas,
+  engine comparison numbers, run steps, API table, roadmap. **Update its numbers and roadmap
+  checkboxes as things change**, and add the live link + swap the Roadmap items after deploy.
+- [ ] `docs/screenshot.png` is a headless-Chrome stand-in (layout squashed — physics doesn't
+  run under virtual time). Nick to replace with a real-browser shot of
+  `/?q=graph%20neural%20networks&sim=0.25` once the layout settles (and again after React).
+- Test UI supports shareable URLs: `/?q=…&engine=tfidf|pgfts&sim=0.25`.
+- `/searches` now returns each distinct query once (most recent run).
