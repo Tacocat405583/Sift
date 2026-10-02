@@ -1,6 +1,6 @@
 import time
-import urllib, urllib.error, urllib.request
 
+import requests
 
 #Rules
 
@@ -22,23 +22,26 @@ USER_AGENT = "SIFTBot/0.1 (contact: nicolashernan2029@gmail.com, nicolaeh@uci.ed
 RETRY_CODES = {406, 503}
 
 
+# Fastly kept 406-ing urllib on requests that curl and `requests` got 200 on (same URL,
+# same headers), so we use requests. One Session = one reused connection, per the rules.
+_session = requests.Session()
+_session.headers.update({"User-Agent": USER_AGENT, "Accept": "application/xml, */*"})
+
+
 def fetch(url: str, attempts: int = 5) -> bytes:
-
-    #headers are useragent
-    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-
     for attempt in range(1, attempts + 1):
-        try:
-            with urllib.request.urlopen(request, timeout=90) as response:
-                return response.read()
-        except urllib.error.HTTPError as error:
-            if error.code not in RETRY_CODES or attempt == attempts:
-                raise
-            #if we are in our retry codes try again 
-            delay = int(error.headers.get("Retry-After", 0)) or attempt * 5
-            print(f"  {error.code} {error.reason} - retrying in {delay}s "
-                  f"(attempt {attempt}/{attempts})")
-            time.sleep(delay)
+        response = _session.get(url, timeout=90)
+        if response.ok:
+            return response.content
+        if response.status_code not in RETRY_CODES or attempt == attempts:
+            response.raise_for_status()
+        # if we are in our retry codes try again
+        delay = int(response.headers.get("Retry-After", 0)) or attempt * 5
+        print(
+            f"  {response.status_code} {response.reason} - retrying in {delay}s "
+            f"(attempt {attempt}/{attempts})"
+        )
+        time.sleep(delay)
 
     raise RuntimeError("unreachable")
 
