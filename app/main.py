@@ -1,19 +1,22 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
-from pydantic import BaseModel
 
-app = FastAPI(title="SIFT API")
-
-
-class Item(BaseModel):
-    name: str
-    price: float
+from app.api import search
+from app.db import pool
 
 
-@app.get("/")
-def read_root():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    pool.open()
+    yield
+    pool.close()
+
+
+app = FastAPI(title="SIFT API", lifespan=lifespan)
+app.include_router(search.router)
+
+
+@app.get("/health")
+def health():
     return {"status": "ok"}
-
-
-@app.post("/items")
-def create_item(item: Item):
-    return item
