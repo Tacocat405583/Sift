@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SIFT</title>
+<link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+<!-- Dev test page. Session 4 replaces this with the React frontend. -->
+<script src="https://unpkg.com/force-graph@1.47.4/dist/force-graph.min.js"></script>
+<style>
+  :root { --bg:#fafafa; --panel:#fff; --text:#1d1d1f; --muted:#6e6e73; --line:#e3e3e8; --accent:#2f6fde; --hl:#fff4c2; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151517; --panel:#1e1e21; --text:#ececf0; --muted:#9a9aa2; --line:#2e2e33; --accent:#6f9bff; --hl:#3a3420; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, sans-serif; background:var(--bg); color:var(--text); }
+  header { display:flex; gap:8px; align-items:center; flex-wrap:wrap; padding:12px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { display:flex; align-items:center; gap:10px; font-size:19px; font-weight:700; margin:0 8px 0 0; letter-spacing:1.2px; }
+  header h1 img { width:28px; height:28px; }
+  input[type=search] { flex:1; min-width:180px; padding:8px 10px; border:1px solid var(--line); border-radius:6px; background:var(--bg); color:var(--text); font:inherit; }
+  button, select { padding:7px 12px; border:1px solid var(--line); border-radius:6px; background:var(--panel); color:var(--text); font:inherit; cursor:pointer; }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  #stats { color:var(--muted); font-size:12px; }
+  main { display:grid; grid-template-columns: minmax(0,1fr) minmax(0,1.2fr) 220px; height:calc(100vh - 58px); }
+  @media (max-width: 900px) { main { grid-template-columns:1fr; height:auto; } #graph { height:420px; } }
+  section { overflow:auto; border-right:1px solid var(--line); }
+  #list { padding:8px 16px; }
+  .paper { padding:10px 8px; border-bottom:1px solid var(--line); border-radius:4px; }
+  .paper.hl { background:var(--hl); }
+  .paper a { color:var(--accent); text-decoration:none; font-weight:600; }
+  .meta { color:var(--muted); font-size:12px; margin:2px 0 4px; }
+  .abs { font-size:13px; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; cursor:pointer; }
+  .abs.open { -webkit-line-clamp:unset; }
+  .row { display:flex; gap:8px; align-items:center; }
+  .save { margin-left:auto; padding:2px 8px; font-size:12px; }
+  #graph-wrap { position:relative; }
+  #graph { width:100%; height:100%; }
+  #slider { position:absolute; top:8px; left:8px; background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:6px 10px; font-size:12px; z-index:1; }
+  aside { padding:12px; overflow:auto; }
+  aside h2 { font-size:12px; text-transform:uppercase; color:var(--muted); margin:12px 0 6px; }
+  aside li { list-style:none; padding:3px 0; font-size:13px; cursor:pointer; }
+  aside ul { padding:0; margin:0; }
+  aside a { color:var(--accent); text-decoration:none; }
+  .empty { color:var(--muted); padding:16px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1><img src="/static/logo.svg" alt="">SIFT</h1>
+  <input id="q" type="search" placeholder="Search arXiv CS papers… e.g. retrieval augmented generation" autofocus>
+  <select id="engine"><option value="tfidf">TF-IDF (hand-rolled)</option><option value="pgfts">Postgres FTS</option></select>
+  <button id="go" class="primary">Search</button>
+  <span id="stats"></span>
+</header>
+<main>
+  <section id="list"><p class="empty">Type a query to search ~19.5k papers.</p></section>
+  <section id="graph-wrap">
+    <div id="slider">min similarity <input id="sim" type="range" min="0" max="0.6" step="0.01" value="0.15"> <span id="simv">0.15</span></div>
+    <div id="graph"></div>
+  </section>
+  <aside>
+    <h2>Recent searches</h2><ul id="recent"></ul>
+    <h2>Library</h2><ul id="library"></ul>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+let result = null, shown = 0, saved = new Set(), selected = null;
+
+const graph = ForceGraph()($("graph"))
+  .nodeId("id")
+  .nodeLabel((n) => `${esc(n.title)}<br>${n.citation_count ?? "?"} citations`)
+  .nodeVal((n) => 1 + Math.sqrt(n.citation_count ?? 0))
+  .nodeColor((n) => n.color)
+  // Selected node: a ring around it instead of a color, so it can't clash with a group color.
+  .nodeCanvasObjectMode((n) => (n.id === selected ? "after" : undefined))
+  .nodeCanvasObject((n, ctx, scale) => {
+    ctx.beginPath();
+    ctx.arc(n.x, n.y, 4 * Math.sqrt(1 + Math.sqrt(n.citation_count ?? 0)) + 3 / scale, 0, 2 * Math.PI);
+    ctx.strokeStyle = getComputedStyle(document.body).getPropertyValue("--text");
+    ctx.lineWidth = 2 / scale;
+    ctx.stroke();
+  })
+  .linkColor(() => "rgba(128,128,128,.35)")
+  .linkWidth((l) => 0.5 + l.similarity * 4)
+  .onNodeClick((n) => select(n.id))
+  // Layout stability: dragging reheats the simulation, and unlinked nodes used to drift
+  // outward forever. More friction + faster cooldown = drags settle locally.
+  .d3VelocityDecay(0.55)
+  .d3AlphaDecay(0.05)
+  .onNodeDragEnd((n) => { n.fx = n.x; n.fy = n.y; }) // pin where dropped
+  .onNodeRightClick((n) => { n.fx = n.fy = undefined; graph.d3ReheatSimulation(); }) // unpin
+  .onEngineStop(() => {
+    if (needsFit) { graph.zoomToFit(400, 40); needsFit = false; } // once per search, never after drags
+  });
+let needsFit = false;
+graph.d3Force("charge").strength(-60).distanceMax(300); // repulsion only between nearby nodes
+graph.d3Force("gravity", gravity(0.025)); // weak pull toward center keeps loose nodes close
+
+// Custom d3 force: nudges every node toward (0, 0), proportional to distance.
+function gravity(k) {
+  let nodes = [];
+  const force = (alpha) => {
+    for (const n of nodes) { n.vx -= n.x * k * alpha; n.vy -= n.y * k * alpha; }
+  };
+  force.initialize = (ns) => (nodes = ns);
+  return force;
+}
+new ResizeObserver(() => graph.width($("graph-wrap").clientWidth).height($("graph-wrap").clientHeight)).observe($("graph-wrap"));
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`);
+  return r.status === 204 ? null : r.json();
+}
+
+async function search(q) {
+  q = (q ?? $("q").value).trim();
+  if (!q) return;
+  $("q").value = q;
+  $("stats").textContent = "searching…";
+  try {
+    result = await api(`/search?q=${encodeURIComponent(q)}&engine=${$("engine").value}`);
+  } catch (e) { $("stats").textContent = e.message; return; }
+  shown = 0; selected = null;
+  $("list").innerHTML = "";
+  $("stats").textContent = `${result.papers.length} papers · ${result.edges.length} edges · ranked in ${result.took_ms} ms`;
+  if (!result.papers.length) $("list").innerHTML = '<p class="empty">No matches.</p>';
+  more();
+  needsFit = true;
+  drawGraph();
+  loadSidebar();
+  setTimeout(pollCitations, 3000); // goal.md: poll once, then resize nodes
+}
+
+function more() {
+  const n = shown === 0 ? 15 : 25;
+  $("list").querySelector(".more")?.remove();
+  for (const p of result.papers.slice(shown, shown + n)) $("list").insertAdjacentHTML("beforeend", paperHtml(p));
+  shown += n;
+  if (shown < result.papers.length)
+    $("list").insertAdjacentHTML("beforeend", `<p class="more"><button onclick="more()">Load more (${result.papers.length - shown} left)</button></p>`);
+}
+
+function paperHtml(p) {
+  return `<div class="paper" id="p${p.id}">
+    <div class="row"><a href="https://arxiv.org/abs/${p.arxiv_id}" target="_blank">${esc(p.title)}</a>
+      <button class="save" onclick="toggleSave(${p.id}, this)">${saved.has(p.id) ? "★ saved" : "☆ save"}</button></div>
+    <div class="meta">${esc(p.authors.slice(0, 4).join(", "))}${p.authors.length > 4 ? " et al." : ""} · ${p.published_at} · ${p.categories.filter((c) => c.startsWith("cs.")).join(" ")} · score ${p.score.toFixed(3)} · <span class="cites" data-id="${p.id}">${p.citation_count ?? "?"}</span> cites</div>
+    <div class="abs" onclick="this.classList.toggle('open')">${esc(p.abstract)}</div></div>`;
+}
+
+// Connected components (union-find): each group is labeled by its smallest paper id, so a
+// group keeps its color while the slider changes unrelated parts of the graph.
+function groups(ids, links) {
+  const parent = new Map(ids.map((id) => [id, id]));
+  const find = (x) => (parent.get(x) === x ? x : (parent.set(x, find(parent.get(x))), parent.get(x)));
+  for (const { source, target } of links) {
+    const a = find(source), b = find(target);
+    if (a !== b) parent.set(Math.max(a, b), Math.min(a, b));
+  }
+  return new Map(ids.map((id) => [id, find(id)]));
+}
+
+// "Random" hue from the group id (hashed, so neighbouring ids aren't similar colors).
+// Saturation/lightness are fixed mid-range so no color can blend into the background.
+function groupColor(groupId) {
+  const hue = (Math.imul(groupId, 2654435761) >>> 0) % 360;
+  return `hsl(${hue}, 75%, 62%)`;
+}
+
+function drawGraph() {
+  const min = +$("sim").value;
+  $("simv").textContent = min.toFixed(2);
+  if (!result) return;
+  const links = result.edges.filter((e) => e.similarity >= min).map((e) => ({ ...e }));
+  const group = groups(result.papers.map((p) => p.id), links);
+  graph.graphData({
+    nodes: result.papers.map((p) => ({ ...p, color: groupColor(group.get(p.id)) })),
+    links,
+  });
+}
+
+function select(id) {
+  selected = id;
+  document.querySelectorAll(".paper.hl").forEach((el) => el.classList.remove("hl"));
+  while (!$(`p${id}`) && shown < result.papers.length) more();
+  $(`p${id}`)?.classList.add("hl");
+  $(`p${id}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  graph.nodeColor(graph.nodeColor()); // repaint
+}
+
+async function pollCitations() {
+  if (!result?.papers.length) return;
+  const { citations } = await api(`/papers/citations?ids=${result.papers.map((p) => p.id).join(",")}`);
+  for (const p of result.papers) p.citation_count = citations[p.id] ?? null;
+  for (const n of graph.graphData().nodes) n.citation_count = citations[n.id] ?? null;
+  document.querySelectorAll(".cites").forEach((el) => (el.textContent = citations[el.dataset.id] ?? "?"));
+  graph.nodeVal(graph.nodeVal()); // resize
+}
+
+async function toggleSave(id, btn) {
+  const on = saved.has(id);
+  await api(`/library/${id}`, { method: on ? "DELETE" : "PUT" });
+  on ? saved.delete(id) : saved.add(id);
+  btn.textContent = on ? "☆ save" : "★ saved";
+  loadSidebar();
+}
+
+async function loadSidebar() {
+  const [recent, library] = await Promise.all([api("/searches?limit=10"), api("/library")]);
+  saved = new Set(library.map((p) => p.id));
+  $("recent").innerHTML = recent.map((s) => `<li title="${s.engine}">${esc(s.query)}</li>`).join("") || '<li class="empty">none yet</li>';
+  $("recent").querySelectorAll("li").forEach((li, i) => recent[i] && (li.onclick = () => search(recent[i].query)));
+  $("library").innerHTML = library.map((p) => `<li><a href="https://arxiv.org/abs/${p.arxiv_id}" target="_blank">${esc(p.title)}</a></li>`).join("") || '<li class="empty">nothing saved</li>';
+}
+
+$("go").onclick = () => search();
+// Block body on purpose: an on* handler that returns false cancels the event (no typing).
+$("q").onkeydown = (e) => {
+  if (e.key === "Enter") search();
+};
+$("engine").onchange = () => result && search(result.query);
+$("sim").oninput = drawGraph;
+loadSidebar();
+// Shareable searches: /?q=...&engine=pgfts&sim=0.3 runs that search on load.
+const params = new URLSearchParams(location.search);
+if (params.get("engine")) $("engine").value = params.get("engine");
+if (params.get("sim")) $("sim").value = params.get("sim");
+if (params.get("q")) search(params.get("q"));
+</script>
+</body>
+</html>
