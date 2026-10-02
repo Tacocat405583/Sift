@@ -2,7 +2,7 @@ import time
 
 import requests
 
-#Rules
+# Rules
 
 # Point to dedicated mirror
 # https://export.arxiv.org
@@ -11,8 +11,8 @@ import requests
 # No multithreading
 # 25000 items ≈ 21 hours of continuous running
 
-#Include a descriptive User-Agent header in request
-#e.g., User-Agent: MySearchEngineBot/1.0 (contact: myemail@example.com)
+# Include a descriptive User-Agent header in request
+# e.g., User-Agent: MySearchEngineBot/1.0 (contact: myemail@example.com)
 
 USER_AGENT = "SIFTBot/0.1 (contact: nicolashernan2029@gmail.com, nicolaeh@uci.edu)"
 
@@ -46,19 +46,14 @@ def fetch(url: str, attempts: int = 5) -> bytes:
     raise RuntimeError("unreachable")
 
 
-
-
 if __name__ == "__main__":
     output_file = "../../data/cs/cs_2026-08-20_2026-08-21_p001.xml"
 
     ## url = 'http://export.arxiv.org/oai2?verb=Identify'
-    url = 'https://oaipmh.arxiv.org/oai?verb=ListRecords&set=cs&metadataPrefix=arXiv&from=2026-08-20&until=2026-08-21'
+    url = "https://oaipmh.arxiv.org/oai?verb=ListRecords&set=cs&metadataPrefix=arXiv&from=2026-08-20&until=2026-08-21"
 
     body = fetch(url)
-    with open(output_file,"wb") as file:
+    with open(output_file, "wb") as file:
         file.write(body)
 
     print(len(body), "bytes")
-
-
-
