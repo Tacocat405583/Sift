@@ -10,9 +10,10 @@ dependencies = [
     "beautifulsoup4",
     "tqdm",
     "lxml",
-    "mlflow>=3.16.0",
     "requests",
-    "arxiv>=4.0.1",
+    "psycopg[binary,pool]>=3.3.6",
+    "numpy>=2.5.3",
+    "scipy>=1.18.1",
 ]
 
 [dependency-groups]
@@ -36,3 +37,4 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
