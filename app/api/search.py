@@ -5,7 +5,7 @@ from datetime import date
 from enum import StrEnum
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 from psycopg import Connection
 from psycopg.rows import dict_row
 from pydantic import BaseModel
@@ -13,8 +13,9 @@ from pydantic import BaseModel
 from app.api.deps import DEV_USER_ID, get_conn
 from app.config import settings
 from app.search import pgfts, tfidf
+from app.services import citations
 
-router = APIRouter()
+router = APIRouter(tags=["search"])
 
 
 class Engine(StrEnum):
@@ -75,6 +76,7 @@ WHERE paper_id = ANY(%(ids)s) AND neighbor_id = ANY(%(ids)s)
 def search(
     q: Annotated[str, Query(min_length=1, max_length=200)],
     conn: Annotated[Connection, Depends(get_conn)],
+    background: BackgroundTasks,
     engine: Engine = Engine.tfidf,
     limit: Annotated[int, Query(ge=1, le=settings.result_limit)] = settings.result_limit,
 ) -> SearchResponse:
@@ -96,6 +98,8 @@ def search(
         "INSERT INTO searches (user_id, query, engine) VALUES (%s, %s, %s)",
         (DEV_USER_ID, q, engine.value),
     )
+    if any(p.citation_count is None for p in papers):
+        background.add_task(citations.hydrate, ids)  # runs after the response is sent
     return SearchResponse(
         query=q, engine=engine, took_ms=round(took_ms, 1), papers=papers, edges=list(edges.values())
     )
