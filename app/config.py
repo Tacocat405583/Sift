@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=ROOT / ".env", extra="ignore")
 
-    database_url: str = "postgresql://sift:sift@localhost:5432/sift"
+    database_url: str = "postgresql://sift:sift@localhost:5433/sift"
 
     # Corpus window. 1 month for the MVP; set HARVEST_MONTHS=3 for the full v1 corpus.
     harvest_months: int = 1
