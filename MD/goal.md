@@ -1,215 +1,160 @@
-# Campus Collab — Design Doc
+sift
 
-Status: draft
-Last updated: 2026-09-02
+Search, rank, and explore arXiv papers by relevance — with a graph view of how they connect.
 
-## 1. Goals
+What it is
 
-**Product goal.** Let students at one campus find each other for side projects. A
-student posts a project idea and the roles they need; other students browse,
-apply, and get accepted. Once a team forms, they move to Discord or wherever —
-the site's job is the match, not the collaboration.
+You type a query like "AI automation." sift returns a ranked list of arXiv papers, plus a force-directed graph of those results showing how they relate to each other. Heavily cited papers appear as large central nodes; similar papers are linked.
 
-**Learning goal.** This project exists to understand how the pieces of a backend
-system fit together, not to ship a startup. Specifically:
+Ranking is TF-IDF, hand-rolled. Not an AI agent, not LLM-powered. An agent layer could be added later but is explicitly out of scope.
 
-- Python backend (FastAPI) talking to a relational database
-- SQL and schema design done deliberately — indexes, joins, and query plans
-  understood rather than hidden behind an ORM
-- Background job processing (the GitHub sync is genuinely async)
-- Caching, added at the point where a real read-path problem appears
-- OAuth as a third-party integration with real constraints (rate limits, token
-  storage)
-- Container orchestration (Kubernetes) as a deliberate late-stage rebuild, not
-  as the day-one deployment story
+Scope
+Corpus (v1)
 
-Components get added when a problem demands them. Nothing is in the stack
-because it looks good on a resume. The one exception is Kubernetes in M7, which
-is explicitly for learning — and the doc says so out loud rather than
-pretending it's load-bearing.
+Computer Science only. Five subcategories:
 
-## 2. Scope
+Category	Field
+cs.AI	Artificial Intelligence
+cs.LG	Machine Learning
+cs.CL	Computation and Language
+cs.MA	Multiagent Systems
+cs.IR	Information Retrieval
+Date window: last 3 months
+Expected size: ~27,000 papers (measured against the live API, deduped for cross-listing)
 
-**In scope**
+Rationale: the date window is the size lever, not the category count. Measured volumes over 12 months are cs.AI 57k, cs.LG 53k, cs.CL 26k, cs.IR 4.9k, cs.MA 3.5k — 105k deduped, far too large for v1. Cross-list dedupe does not meaningfully reduce this. At 3 months the corpus is dense enough for a good graph, computable locally, and the neighbors job stays tractable (~366M pair comparisons rather than ~5.5B).
 
-1. GitHub OAuth login; profile auto-populated from GitHub repos and languages
-2. Post a project: title, description, skills needed, roles open, spot count
-3. Browse and filter projects by skill, tag, and status
-4. Apply to a project; owner accepts or rejects
+User topics ≠ index scope
 
-**Out of scope (deliberate)**
+Two separate concepts, separate schema fields:
 
-- In-app chat or messaging — teams move off-platform
-- Email or push notifications
-- Multi-campus / tenancy
-- Free-text search over descriptions (filters only for v1)
-- Ratings, reviews, reputation
-- Project progress tracking
+Index scope — what's in the database. Decided by us, fixed above.
+User topics — 5 subcategories a user picks at onboarding. Filters/personalizes results within the index.
 
-**Scale assumptions**
+They start as the same list. They should not be the same column.
 
-Single campus, ~30k students. Realistic active use: ~2k users, ~500 projects,
-maybe 50 applications a day. This is small. A single Postgres instance handles
-it without breathing hard.
+Data model
+Sources
+arXiv — metadata (title, abstract, authors, categories, dates, arXiv ID). No citation data available here.
+Semantic Scholar API — citation counts and reference lists. Direct arXiv:XXXX.XXXXX lookup, batch endpoint accepts up to 500 IDs per call. Get an API key — the unauthenticated tier is roughly 1 req/sec on a shared pool.
+Ingest: OAI-PMH, not the query API
 
-This is worth stating plainly: nothing here is forced by volume. Any
-infrastructure beyond one API server and one database is justified by learning,
-by latency, or by an external constraint (GitHub's rate limit) — not by traffic.
-Where that's the case, the doc says so.
+The arXiv query API caps at 2000 results/request, wants a 3s courtesy delay, and degrades on deep start offsets. For a 27k-paper bulk pull use OAI-PMH, which is the sanctioned bulk access path. The query API is fine for incremental daily top-ups.
 
-## 3. Non-functional requirements
+Citation hydration: lazy and async
 
-| Requirement             | Target                     | Why                                                 |
-| ----------------------- | -------------------------- | --------------------------------------------------- |
-| Browse latency          | p95 < 300ms                | Browsing _is_ the product. Slow browse = dead site. |
-| Browse consistency      | Eventual OK                | A project showing up 30s late costs nothing.        |
-| Application consistency | Strong                     | Double-accepting past the spot limit is a real bug. |
-| Login latency           | < 1s                       | GitHub sync must not block the login response.      |
-| GitHub API budget       | 5000 req/hr per user token | Hard external ceiling. Shapes the sync design.      |
+Do not fetch citations at index time. When a query returns its result set, batch-fetch citation counts for those papers, write to citation_count, cache indefinitely (refresh monthly at most).
 
-## 4. Core entities
+Async, not blocking. The search endpoint returns immediately. Citation fetching happens in the background; the client polls a second endpoint (GET /papers/citations?ids=...) once and resizes nodes when the data lands. Cold queries render with uniform node sizes for a beat rather than stalling 1–2s.
 
-- **User** — id, github_id, github_login, avatar, display_name, bio, created_at
-- **Project** — id, owner_id, title, description, status (open/closed), spots,
-  created_at
-- **Skill** — id, name (canonical, deduped: "Python" not "python"/"python3")
-- **UserSkill** — user_id, skill_id, source (github_sync | manual)
-- **ProjectSkill** — project_id, skill_id
-- **Application** — id, project_id, user_id, status (pending/accepted/rejected),
-  message, created_at, decided_at
-- **ProjectMember** — project_id, user_id, joined_at
+Effect: popular papers hydrate naturally through use; the long tail never costs an API call.
 
-Notes:
+Tables (sketch)
+papers — arxiv_id, title, abstract, authors, categories, published_at, citation_count, citation_fetched_at
+terms — term, document_frequency, idf
+postings — term, paper_id, term_frequency, doc_norm
+neighbors — paper_id, neighbor_id, similarity (top-K, precomputed)
+users — id, topics
+library — user_id, paper_id, saved_at
+searches — user_id, query, created_at
 
-- Skills are a shared table with join tables on both sides, not a text array.
-  Filtering "projects needing Python" is then an indexed join instead of a
-  string scan.
-- `Application` and `ProjectMember` are separate. An application is a request
-  with a lifecycle; membership is a fact. Accepting flips one and creates the
-  other, in a single transaction.
-- Unique constraint on `(project_id, user_id)` in Application — one application
-  per person per project. Let the database enforce it, not the API layer.
+Every user-scoped table carries user_id from day one, even though v1 hardcodes a single dev user. Auth then becomes "populate this column properly" rather than a migration across every table.
 
-## 5. API sketch
+Ranking
+The key distinction
 
-```
-POST   /auth/github/callback      # exchange code, create session
-GET    /users/me
-PATCH  /users/me
-GET    /users/{id}
+TF-IDF scores are query-dependent. A paper has no single fixed score — it has a score relative to a query.
 
-POST   /projects
-GET    /projects?skills=py,react&status=open&cursor=...
-GET    /projects/{id}
-PATCH  /projects/{id}             # owner only
-DELETE /projects/{id}             # owner only
+At index time (precomputed once):
 
-POST   /projects/{id}/applications
-GET    /projects/{id}/applications # owner only
-PATCH  /applications/{id}          # owner only: accept | reject
-GET    /users/me/applications      # applicant's own view
-```
+Strip LaTeX, then tokenize title + abstract
+Term frequency per document → postings.term_frequency
+Document length normalization → postings.doc_norm
+IDF across the corpus → terms.idf
 
-Pagination is keyset (cursor), not offset. `OFFSET 5000` re-scans 5000 rows;
-`WHERE (created_at, id) < (?, ?)` uses the index. At 500 projects this does not
-matter — it's here because doing it right costs nothing now and rewriting later
-costs a day.
+At query time:
 
-## 6. High-level architecture
+Look up postings only for the query's terms
+Multiply TF × IDF at query time, dot product, sort
+Why IDF lives in terms, not baked into postings
 
-```
-                      ┌──────────┐
-   Client (React) ───▶│ FastAPI  │───▶ Postgres
-                      └────┬─────┘
-                           │
-                    enqueue│              ┌────────┐
-                           ▼              │ Redis  │◀── cache reads
-                      ┌─────────┐         └────────┘
-                      │ Worker  │───▶ GitHub API
-                      └─────────┘
-```
+If IDF were folded into each posting's weight, every nightly IDF refresh would require rewriting all ~3M posting rows. Keeping IDF in the terms table means a refresh is O(vocab) instead of O(postings), and a query touches only the handful of term rows it needs. The cost is one multiply per posting at query time, which is nothing.
 
-**Three request paths worth tracing:**
+Tokenization
 
-_Login._ GitHub redirects back with a code → API exchanges it for a token →
-upserts the user → enqueues a sync job → returns a session immediately. The
-worker then pulls repos, calls the languages endpoint per repo, maps byte counts
-to skills, and writes UserSkill rows. Login does not wait on any of this. First
-login shows an empty skill list that fills in seconds later.
+arXiv abstracts are full of LaTeX — $O(n\log n)$, \cite{}, \emph{}. A naive [a-zA-Z0-9]+ regex produces junk tokens (O, n, log, cite, emph) that pollute the vocabulary and distort IDF. Strip LaTeX before tokenizing.
 
-_Browse._ Filter query hits the API, checks cache, falls through to Postgres.
-The open question is the cache key: filters are arbitrary combinations, so
-naively keying on the full query string gives a near-zero hit rate. Options are
-caching only the unfiltered default feed (which is likely most traffic anyway),
-or caching project objects individually and letting the DB return just IDs.
-Decide this with real numbers, not upfront.
+Reindexing
 
-_Apply and accept._ The write path. Accepting must check remaining spots and
-insert a membership atomically — `SELECT ... FOR UPDATE` on the project row, or
-a check constraint on member count. Two browser tabs accepting the last spot
-simultaneously is the case to design against.
+New papers get indexed on arrival. Old papers are never re-scored — only IDF needs touching up as the corpus grows, and that batches nightly.
 
-## 7. Open questions
+Two ranking engines, one codebase
+Hand-rolled TF-IDF — the point of the project
+Postgres full-text search — tsvector + GIN index + ts_rank
 
-- Cache key strategy for filtered browse (see above) — resolve with measurement
-- How stale can GitHub-derived skills be? Sync on every login, or daily, or on
-  demand?
-- Skill canonicalization: GitHub's language names are clean, but manually-added
-  skills ("ML", "machine learning", "Machine Learning") need normalizing
-- Does a rejected applicant get to re-apply?
+Selected by query parameter: ?engine=tfidf|pgfts. Not separate git branches — the whole value is comparing them side by side on the same corpus, which requires both running at once.
 
-## 8. Build order
+Graph
+Result set cap
 
-Each milestone is deployable and does something a user can see.
+A query retrieves the top 125 papers by score. The graph draws all 125. The list paginates through them (15 on page 1, +25 per "load more"). Without a cap a broad query matching thousands of papers cannot render.
 
-- **M0** — FastAPI skeleton, Postgres, migrations, health endpoint, Docker
-  Compose for local dev
-- **M1** — GitHub OAuth end to end. Log in, see your own profile. Sync runs
-  inline and slowly; that's fine for now.
-- **M2** — Projects CRUD, skill join tables, filter query. No cache.
-- **M3** — Applications and the accept/reject flow, including the concurrency
-  handling.
-- **M4** — Move GitHub sync to a background worker. This is the first component
-  added because a measured problem demanded it.
-- **M5** — Measure the browse path. Add caching only if the numbers justify it,
-  and write down what the numbers were.
-- **M6** — Frontend, deploy.
-- **M7** — Rebuild deployment on Kubernetes. Explicitly a learning milestone,
-  not a scale requirement (see §9).
+Edges: precomputed top-K neighbors
 
-M4 and M5 are the interesting ones. M0–M3 are the foundation that makes them
-possible to talk about honestly.
+Cosine similarity between paper TF-IDF vectors. All-pairs on 27k papers is ~366M comparisons — too slow live, fine as an offline batch job.
 
-## 9. M7: Kubernetes (learning milestone)
+Each paper stores its top 20 nearest neighbors. Rendering a query's graph is then: keep edges where both endpoints are in the result set. No live similarity math.
 
-**Framing.** At this project's scale Docker Compose is enough. Kubernetes is not
-required by traffic, cost, or reliability targets. It's here to build a bullet
-that can be defended in an interview, not because the site outgrew Compose.
+Two behaviors from one job:
 
-**What it does for this architecture that Compose doesn't.** The API and worker
-scale independently. If the GitHub sync queue backs up, worker replicas can
-grow without touching the API. Rolling deploys happen without downtime.
-Restart-on-crash and health checks are declarative instead of scripted.
+Query-independent "related work" web (a paper's neighbors are always its neighbors)
+Query-dependent clustering (filter those edges to the current results)
 
-**Scope.**
+Similarity threshold is a UI slider — loosen or tighten the web.
 
-- Dockerfiles for API and worker (needed regardless — this comes earlier in the
-  build)
-- Manifests: Deployment (API), Deployment (worker), Service, ConfigMap, Secret,
-  Ingress. Roughly 200 lines of YAML.
-- Postgres and Redis stay external (managed or Compose) — running stateful
-  workloads on k8s is a rabbit hole and adds no learning value here
-- Run locally on minikube or kind. No managed cluster, no cloud bill
-- One HorizontalPodAutoscaler on the worker Deployment, so scaling the worker
-  independently is demonstrated, not just theoretical
-- Watch a rolling deploy actually happen
+Node sizing
 
-**Explicitly out of scope for M7.** Helm, service mesh, GitOps, operators,
-managed cloud clusters, custom controllers, network policies, observability
-stack. These are the next layer of depth and belong to a different project.
+By citation_count, populated asynchronously as described above.
 
-**The honest interview line.** "I deployed with Docker Compose first, then
-rebuilt on Kubernetes to learn it. API and worker are separate Deployments so
-they scale independently. I ran it on minikube. I haven't operated k8s in
-production and know there's a lot I don't know about networking and
-observability at scale."
+Stability under pagination
+
+The list paginates. The graph does not. It renders all 125 nodes from the start and stays fixed while the list pages beneath it.
+
+Views
+1. Query graph — v1
+
+Force-directed cluster of the result set. Nodes = papers, sized by citations. Edges = top-K similarity, filtered to the result set.
+
+2. Citation / inheritance tree — v1.5
+
+Click a paper → expand its citation lineage one hop at a time, fetched on demand from Semantic Scholar, depth-limited so it doesn't explode. Interactive rather than precomputed.
+
+3. Author view — later
+
+Authors as nodes, sized by total citations or paper count. Fields/subfields overlaid. Deliberately vague for now.
+
+Stack
+Backend — FastAPI (Python; numpy/scipy available for the TF-IDF math)
+Database — Postgres
+Frontend — React + react-force-graph (d3-force wrapper; zoom, drag, collision handled out of the box)
+Division of work
+
+Frontend is handled for Nick. Backend is the learning target — REST method design, schema design, the inverted index, TF-IDF implementation, and comparing ranking engines. Backend work gets walked through step by step, including the schema, and Nick writes it. Not handed over finished.
+
+v1 done criteria
+ ~27k CS papers ingested via OAI-PMH from the 5 subcategories, last 3 months
+ LaTeX-stripped tokenizer
+ Inverted index built (TF + norm in postings, IDF in terms)
+ TF-IDF query returns sensible ranked results, top 125
+ ?engine= toggle with Postgres FTS as the comparison
+ Top-K neighbors precomputed
+ Query graph renders, stable under pagination
+ Citation counts hydrate async and resize nodes
+ Library + recent searches persist (single hardcoded user)
+Explicitly not in v1
+Authentication
+Citation/inheritance tree
+Author graph
+Summarization
+Any LLM or agent layer
+Non-CS arXiv categories

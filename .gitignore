@@ -17,3 +17,14 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+
+# Folders
+
+# MLflow local tracking server state
+mlruns/
+mlartifacts/
+mlflow.db
+
+# Harvested corpus (regenerate with the crawler)
+data/
